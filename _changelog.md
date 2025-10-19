@@ -1,0 +1,242 @@
+- v4.5.0 (2025-10-18):
+    - **Feature**: Added `isolate_memories` valve to enable/disable concurrent access to all user memories.
+    - **Architecture**: Implemented a toggle system that allows the assistant to access memories from all users when isolation is disabled.
+    - **Security Enhancement**: Simplified implementation by making inter-user memory operations read-only for security.
+    - **Bug Fix**: Fixed an issue where users could not update their own memories when `isolate_memories` was False.
+    - **Changes**:
+        - Added new valve `isolate_memories` (default: True) to `Filter.Valves` to control memory isolation behavior.
+        - Modified database queries in `_lookup_memories_by_override()`, `get_relevant_memories()`, and `inlet()` to search across all users when `isolate_memories` is False.
+        - Enhanced vector search functionality to query across all user collections when `isolate_memories` is False.
+        - Updated `_delete_memory()` and `_update_memory()` functions to allow users to modify their own memories while preventing modification of other users' memories when `isolate_memories` is False.
+        - Added `_get_global_relevant_memories()` method to handle global memory retrieval when isolation is disabled.
+        - Modified memory formatting methods (`_format_memories_for_context()`, `_update_message_context()`) to include user attribution when memories are not isolated.
+        - Added `_get_user_name_by_id()` helper to resolve user names for attribution in non-isolated mode.
+        - Enhanced memory operations to use actual memory user_id rather than assuming current user for proper cross-user operations.
+    - **Behavior**: When `isolate_memories` is True (default), system maintains complete user memory isolation. When set to False, assistant can access all user memories concurrently with proper user attribution in memory context, and users can still modify their own memories.
+    - **Security**: Memory operations are simplified to prevent cross-user modifications. When `isolate_memories` is False, the assistant can READ all user memories for context and users can still UPDATE/DELETE their own memories, but cannot modify memories belonging to other users.
+
+- v4.4.1 (2025-10-13):
+    - **Fix**: Resolved outbound payload logging issue where payload was being output as a single text block instead of human-readable format.
+    - **Root Cause**: The sanitization method was overly complex and was truncating the JSON structure.
+    - **Changes**:
+        - Removed the complex 60-line sanitization method that was added previously.
+        - Implemented a simple string replacement approach to truncate base64 image data strings while preserving readable JSON structure.
+        - Changed outbound payload logging to use `json.dumps(body, indent=2, ensure_ascii=False)` for complete JSON formatting.
+        - Added regex replacement to truncate base64 image data to prevent log flooding.
+    - **Behavior**: Outbound payload logging now produces clean, human-readable JSON output while properly handling base64 image data. This allows for effective debugging when the `show_outbound_payload` valve is enabled.
+# MRS Changelog
+
+- v4.4.0 (2025-10-12):
+    - **Feature**: Added Prompt Memory DB Fetch capability to MRS module, relocating functionality from Anthropic pipeline.
+    - **Architecture**: Prompt memories are now fetched directly from the database and injected as system messages at the beginning of the context, bypassing the normal vector search and tag exclusion logic.
+    - **Changes**:
+        - Added new valves: `PROMPT_DB_FETCH_ENABLED` (default: True), `PROMPT_MAX_ITEMS` (default: 5), `PROMPT_MAX_CHARS` (default: 8000) to `Filter.Valves`
+        - Added helper method `_strip_leading_tags(content: str) -> str` to remove leading bracketed tags from content
+        - Added helper method `_build_prompt_block(mem_id: str, content: str) -> dict` to format prompt memories for injection
+        - Added core logic method `_fetch_prompt_memories_from_db(user_id: str) -> List[dict]` to query and format prompt memories
+        - Integrated prompt fetching early in `Filter.inlet()` method to inject [Prompt] memories before tag exclusion logic runs
+        - Version bumped from 4.3.9 to 4.4.0
+    - **Behavior**: When enabled, [Prompt] memories are fetched from the database and injected as system messages at the beginning of the context, ensuring they are always available to the assistant regardless of the `inlet_excluded_tags` setting.
+- v4.3.9 (2025-10-11):
+    - **Fix**: Corrected a bug where successful memory operations (creation, deletion, updates) were not being properly logged in the citation output.
+    - **Root Cause**: The status updates for successful memory operations were being accumulated but not properly passed to the citation system.
+    - **Changes**:
+        - Modified [`Filter._memory_writer_task()`](AMS_MRS_v4_Module.py:2376) to correctly pass all citation types (created, deleted, updated, purged) to the citation system.
+        - Enhanced logging in [`Filter._execute_memory_operations()`](AMS_MRS_v4_Module.py:1364) to ensure all memory operations are properly logged.
+        - Added more descriptive logging for memory operation status updates.
+    - **Behavior**: Memory operations are now correctly reported in the UI citations, providing better visibility into the memory management process.
+- v4.3.8 (2025-10-06):
+    - **Fix**: Resolved tag-based memory recall returning only one memory instead of up to `llm_search_top_k` results.
+    - **Root Cause**: The database query used incorrect filter syntax (`*[filter for filter in tag_filters]`) which failed to properly combine multiple tag filters with OR logic.
+    - **Changes**:
+        - Added `from sqlalchemy import or_` import at line 19 for proper SQL OR operations
+        - Fixed tag query in [`Filter._lookup_memories_by_override()`](AMS_MRS_v4_Module.py:652) to use `or_(*tag_filters)` instead of filter unpacking
+        - Enhanced tag matching from `[{tag}]%` to `%[{tag}]%` to find tags anywhere in content
+        - Added verification step to confirm tags are in leading position using `_extract_leading_tags()`
+        - Increased query multiplier from `remaining` to `remaining * 3` to account for post-query filtering
+        - Added diagnostic logging to [`Filter._extract_shortids_and_tags_from_focus()`](AMS_MRS_v4_Module.py:621) for tag extraction debugging
+    - **Behavior**: Tag searches via Memory Focus now correctly return multiple memories (up to `llm_search_top_k`) that match ANY of the specified tags, with leading tag verification to ensure accuracy.
+- v4.3.7 (2025-10-03):
+    - **Feature**: Silent error notification system for memory operation failures (UPDATE/DELETE). When Sol makes mistakes with memory operations, errors are now silently injected into the next turn's user message for correction.
+    - **Architecture**: Errors are appended to the last user message in inlet, preserving the Anthropic cache chain (Tools → System[1h cache] → Messages).
+    - **Changes**:
+        - Added `_memory_operation_errors` tracking dict in [`Filter.__init__`](AMS_MRS_v4_Module.py:239)
+        - Error capture in [`Filter._delete_memory()`](AMS_MRS_v4_Module.py:1606) and [`Filter._update_memory()`](AMS_MRS_v4_Module.py:1653)
+        - Error injection into last user message in [`Filter.inlet()`](AMS_MRS_v4_Module.py:2390)
+    - **Format**: Errors injected as JSON block with structure: `{"memory_operation_errors": [{"operation": "update/delete", "shortid": "...", "error": "...", "level": "WARNING"}]}`
+    - **Behavior**: Errors appear at tail of user message in Pipeline OUTBOUND payload, visible for cache validation and Sol receives them for retry logic.
+- v4.3.6 (2025-09-23):
+    - **Feature**: The anchor memory is now the most recent `[Session]` memory.
+    - **Changes**:
+        - Modified [`Filter.inlet()`](AMS_MRS_v4_Module.py:2215) to filter for memories with content starting with `[Session]`.
+- v4.3.5 (2025-09-22):
+    - Hardening: Decoupled UI event emission from DB operations to prevent stalls when users navigate away during streaming.
+    - Logging: Added a completion log entry "All processing complete for {user_email}" at the end of memory processing.
+    - Changes:
+        - Emission is now fire-and-forget with a short timeout in [`python._emit_event()`](AMS_MRS_v4_Module.py:1752).
+        - Pre-DB status emits switched to non-blocking:
+            - "Saving memories…" in [`python._execute_memory_operations()`](AMS_MRS_v4_Module.py:1360)
+            - "Purging …" in [`python._delete_excess_memories()`](AMS_MRS_v4_Module.py:496)
+            - "Deduplicating …" in [`python._deduplicate_user_memories()`](AMS_MRS_v4_Module.py:1900)
+        - Removed the final status clear hack (sleep + clear) in the writer finalization: [`python._memory_writer_task()`](AMS_MRS_v4_Module.py:2357)
+        - Added completion logging in [`Filter._memory_writer_task()`](AMS_MRS_v4_Module.py:2360)
+    - Notes:
+        - These changes reduce coupling to the client socket and improve robustness under off-page conditions.
+        - The underlying outlet completion issue when away during streaming may still occur; analysis ongoing.
+- v4.3.4 (2025-09-20):
+    - Feature: Semantic Steering extraction and prompt injection. The last assistant message's '<details><summary>Semantic Steering</summary>...</details>' block is parsed and its body is placed into the <assistant_message> field of the relevance prompt. Implemented via [python._extract_semantic_steering()](AMS_MRS_v4_Module.py:590) and wired in [python._get_relevant_memories_llm()](AMS_MRS_v4_Module.py:819).
+    - Logging: Added verbose logging to print only the relevance prompt header (content before '<existing_memories>') for the first chunk, enabling verification of the injected assistant_message without duplicative logs. See [python._get_relevant_memories_llm()](AMS_MRS_v4_Module.py:860).
+    - Behavior: If no steering block exists, an empty assistant_message is used. If multiple steering blocks appear, only the first is used and subsequent ones are ignored.
+- v4.3.3 (2025-09-17):
+    - Feature/Logging: Added a concise embed source tag to vector-search logs to confirm whether platform or local embeddings were used. Implemented in [`Filter._get_candidate_memories_vector_search()`](AMS_MRS_v4_Module.py:923) as `[embed=platform|local]`.
+    - Config/Fix: The `vector_db` valve now hot-swaps the Chroma client path at runtime and is respected on init.
+        - Track active path via `_vector_db_path` in [`Filter.__init__()`](AMS_MRS_v4_Module.py:238).
+        - Reinitialize client on `vector_db` updates in [`Filter.update_valves()`](AMS_MRS_v4_Module.py:305).
+        - Defensive path sync when accessing collections in [`Filter._get_collection()`](AMS_MRS_v4_Module.py:648).
+    - Notes: Minimal change, no schema migration. New `vector_db` paths are created lazily under `data/<vector_db>`.
+- v4.3.2 (2025-09-16):
+    - **Fix**: Resolved missing timestamps in memory metatags that occurred in fallback scenarios when LLM re-ranking was skipped or failed.
+    - **Architecture**: Added centralized timestamp formatting with consistent error handling and diagnostic logging.
+    - **Changes**:
+        - Added [`Filter._format_memory_timestamp()`](AMS_MRS_v4_Module.py:622) method for consistent, reliable timestamp formatting across all memory contexts.
+        - Fixed missing `updated_at` field in [`ProcessingMemory`](AMS_MRS_v4_Module.py:1008) constructors during vector search fallback scenarios in [`Filter.get_relevant_memories()`](AMS_MRS_v4_Module.py:1006).
+        - Updated [`Filter._format_memories_for_context()`](AMS_MRS_v4_Module.py:1072) and [`Filter._update_message_context()`](AMS_MRS_v4_Module.py:1124) to use centralized formatter.
+        - Enhanced diagnostic logging to capture invalid timestamp errors during formatting.
+        - Standardized timestamp format consistency between citation logs and message context.
+- v4.3.1 (2025-09-15):
+    - **Fix**: Corrected a bug where the most recently updated memory could bypass the `inlet_excluded_tags` filter.
+    - **Changes**:
+        - Modified [`Filter.inlet()`](AMS_MRS_v4_Module.py:1778) to apply the `_has_excluded_tag()` check to the `newest_memory` immediately after it is fetched from the database.
+- v4.3.0 (2025-09-11):
+    - Breaking/Architecture: Switched assistant memory parsing from fragile emoji delimiters to HTML details blocks. No legacy fallback.
+    - Benefits: Eliminates delimiter syntax errors, clean separation of operations from conversational content, preserves unrelated HTML, reduces cognitive overhead for models.
+    - Changes:
+        - Replaced [python._parse_assistant_response_for_memories()](AMS_MRS_v4_Module.py:1244) to parse `<details><summary>Memory: …</summary>…</details>` blocks and removed the legacy delimiter regex.
+        - Updated docstring in [python.outlet()](AMS_MRS_v4_Module.py:1924) to reflect details-based parsing.
+        - Bumped module version in [AMS_MRS_v4_Module.py](AMS_MRS_v4_Module.py:5) to 4.3.0.
+        - Prompt updated to emit details blocks and forbid legacy delimiters in [Assistant_Prompt_Sol_1.9.1.md](Assistant_Prompt_Sol_1.9.1.md:3) (Version 1.9.2 section; Memory Workflow/Details Block Format; Critical Directives).
+- v4.2.3 (2025-09-11):
+    - **Feature**: Added `updated_at` timestamp to memories injected into the assistant's context. The timestamp is formatted for readability and is timezone-aware.
+    - **Configuration**: Introduced a new `timezone_offset` valve to allow users to specify their local timezone for accurate timestamp display.
+    - **Changes**:
+        - Added `updated_at` field to the `ProcessingMemory` data class.
+        - Modified [`_format_memories_for_context()`](AMS_MRS_v4_Module.py:931) and [`_update_message_context()`](AMS_MRS_v4_Module.py:956) to include the formatted, timezone-aware timestamp in the memory string.
+- v4.2.2 (2025-09-11):
+    - **Feature**: The assistant's context now includes the most recently updated memory, fetched directly from the database. This "anchor" memory is placed at the top of the list, ensuring the assistant always has the latest context, followed by memories sorted by relevance.
+    - **Changes**:
+        - Modified [`Filter.inlet()`](AMS_MRS_v4_Module.py:1675) to perform a direct database query for the newest memory and prepend it to the retrieved relevant memories list.
+- v4.2.1 (2025-09-08):
+    - **Note**: Internal release; changes integrated into v4.2.2.
+- v4.2.0 (2025-09-06):
+    - **Architecture**: Shifted from timestamp-based keying to short UUID (first 8 characters) for deterministic update and delete operations, resolving non-uniqueness issues during batch creations.
+    - **Changes**:
+        - Added `id` field to `ProcessingMemory` class.
+        - Updated [`Filter._format_memories_for_context()`](AMS_MRS_v4_Module.py:869) to prepend short ID to each memory in the assistant context.
+        - Modified [`Filter._parse_assistant_response_for_memories()`](AMS_MRS_v4_Module.py:1196) to extract short ID for UPDATE and DELETE commands.
+        - Refactored [`Filter._delete_memory()`](AMS_MRS_v4_Module.py:1071) and [`Filter._update_memory()`](AMS_MRS_v4_Module.py:1125) to perform lookups using short ID prefix.
+        - Simplified [`Filter._create_memory()`](AMS_MRS_v4_Module.py:987) by removing timestamp prepending logic.
+        - Removed obsolete [`Filter._backfill_memory_timestamps()`](AMS_MRS_v4_Module.py:1565) function and its invocation.
+    - **Notes**: This change improves reliability for operations on recently created memories while maintaining clean separation of metadata from content.
+- v4.1.0 (2025-09-05):
+    - **Architecture**: Re-architected memory update and delete operations to be deterministic, replacing the fragile vector-based search with a reliable timestamp-based key.
+    - **Feature**: Introduced a new `♻️ UPDATE` operator for all memory types.
+    - **Process**: Implemented a "create-then-update" pattern in [`Filter._create_memory()`](MRS/AMS_MRS_v4_Module.py:994) to prepend a database-sourced timestamp to all new memories, ensuring a stable, unique identifier.
+    - **Process**: The [`Filter._delete_memory()`](MRS/AMS_MRS_v4_Module.py:1078) and new [`Filter._update_memory()`](MRS/AMS_MRS_v4_Module.py:1132) functions now use this timestamp prefix for fast, deterministic database lookups, completely bypassing vector search for these operations.
+    - **Migration**: Added a non-blocking background task, [`Filter._backfill_memory_timestamps()`](MRS/AMS_MRS_v4_Module.py:1572), that runs once per session to seamlessly upgrade legacy, non-timestamped memories.
+    - **Cleanup**: Removed the now-obsolete `delete_distance_threshold` valve.
+    - **Fix**: Corrected a bug where importance scores were being stripped from memories during an update operation.
+- v4.0.4 (2025-09-03):
+    - Performance: Optimized the [`Filter._deduplicate_user_memories()`](MRS/AMS_MRS_v4_Module.py:1289) function to be vector-first. The inefficient initial load of all memories from the SQL database has been removed. The function now identifies duplicate clusters using only data from the vector store and then performs a single, targeted query to fetch the necessary metadata for only the memories in those clusters.
+- v4.0.3 (2025-09-03):
+    - Performance: Overhauled the memory retrieval process in [`Filter.inlet()`](MRS/AMS_MRS_v4_Module.py:1544) and [`Filter.get_relevant_memories()`](MRS/AMS_MRS_v4_Module.py:797) to be vector-first. The system no longer loads all memories from the database on every turn. Instead, it now performs a vector search first to get candidate IDs and then executes a single, targeted database query to fetch only the relevant memories.
+    - Refactor: Removed the `enable_vector_search` valve and associated logic, making vector search a permanent, non-optional part of the memory retrieval pipeline. This simplifies the code and removes a potential regression path.
+- v4.0.2 (2025-09-03):
+    - Performance: Optimized the [`Filter._backfill_user_vectors()`](MRS/AMS_MRS_v4_Module.py:1232) function to use direct database queries for fetching memory IDs, significantly reducing memory usage and improving efficiency for users with large memory sets. The function now fetches only the IDs first, compares them to the vector store, and retrieves full memory content only for missing vectors. Also corrected Row object handling to resolve a SQLAlchemy binding error.
+- v4.0.1 (2025-09-03):
+    - Performance: Optimized the shallow pruning process in [`Filter._delete_excess_memories()`](MRS/AMS_MRS_v4_Module.py:399) to prevent performance degradation for users with many memories. The function now performs a lightweight database count query to check if pruning is needed before loading the full content of all memories, avoiding a costly operation on every turn.
+- v4.0.0 (2025-08-21):
+    - Architecture:
+        - Standardized LLM access through the Open WebUI connector; removed all direct OpenAI/Ollama HTTP usage and legacy retry logic from the MRS code path. Re-ranking now calls the connector via [`Filter._chat_via_connector()`](MRS/AMS_MRS_v4_Module.py:571), orchestrated from [`Filter._get_relevant_memories_llm()`](MRS/AMS_MRS_v4_Module.py:610).
+        - Eliminated the dual-path design; there is no fallback to direct providers. This aligns MRS with the SMR pattern and centralizes provider credentials/quotas/telemetry in the platform.
+        - The legacy direct API helper from v3 has been removed; reference for history: [`Filter._query_api()`](MRS/AMS_MRS_v3_Module.py:1300).
+    - API:
+        - Inlet now accepts the platform request for connector access (parity with SMR) in [`Filter.inlet()`](MRS/AMS_MRS_v4_Module.py:1477). The user entity is resolved via `Users.get_user_by_id` for attribution and governance.
+    - Configuration:
+        - Added valves: `reranker_model_id` and `llm_request_timeout_seconds` to control the connector model and timeout budget.
+        - Retained common LLM knobs: `temperature`, `max_tokens`.
+        - Removed all provider-specific settings (`openai_*`, `ollama_*`, `api_provider`) and the speculative `provider_options` valve after validation issues; metadata is now minimal and stable.
+    - Fixes/Hardening:
+        - Corrected connector response parsing to use the standard OpenAI-compatible shape: `choices[0].message.content` in [`Filter._chat_via_connector()`](MRS/AMS_MRS_v4_Module.py:602).
+        - Fixed Chroma vector search ID handling (list-of-lists) by flattening candidate IDs in [`Filter._get_candidate_memories_vector_search()`](MRS/AMS_MRS_v4_Module.py:769).
+        - Fixed vector-based delete result unwrapping (ids/distances/documents) and threshold comparison in [`Filter._delete_memory()`](MRS/AMS_MRS_v4_Module.py:1054).
+        - Made connector metadata robust and minimal; `user_id` is derived safely from dict/object in [`Filter._chat_via_connector()`](MRS/AMS_MRS_v4_Module.py:575).
+        - Completed the memory writer finalization block to always emit/clear a final status and added the outlet entry point in v4: [`Filter._memory_writer_task()`](MRS/AMS_MRS_v4_Module.py:1631) and [`Filter.outlet()`](MRS/AMS_MRS_v4_Module.py:1656).
+    - Behavior:
+        - Embedding pathway and vector DB flow are unchanged; only the LLM re-ranking call switched to the connector.
+        - Recursion protection retained via `bypass_filter=True` on connector calls.
+        - Memory gating via `memory_enabled_models` preserved.
+- v3.10.6 (2025-08-19):
+    - UX: Prefer user email over UUID in logs and citations; internal persistence and vector operations remain UUID-based.
+    - Implementation: Reused the incoming `__user__` to display email across inlet/outlet and maintenance flows (pruning, backfill, dedupe, citations) with no additional DB/API calls. Passed `__user__` via kwargs only for logging context.
+    - Version/date bump in [AMS_MRS_v3_Module.py](MRS/AMS_MRS_v3_Module.py).
+- v3.10.5 (2025-08-19):
+    - **Feature**: Implemented a selective memory processing gate in the `inlet` to bypass MRS for non-memory-enabled models, significantly reducing latency.
+    - **Configuration**: Migrated the hard-coded list of memory-enabled models to a new `memory_enabled_models` valve for flexible, UI-driven configuration.
+- v3.10.4 (2025-08-13):
+    - Tooling: Added Black/isort/Ruff configuration in [pyproject.toml](pyproject.toml) and pre-commit hooks in [.pre-commit-config.yaml](.pre-commit-config.yaml) for consistent formatting and linting.
+    - Logging/Safety: Masked secrets in configuration logging, normalized 🗑️ emoji, and now catch asyncio.TimeoutError on shutdown in [AMS_MRS_v3_Module.py](AMS_MRS_v3_Module.py).
+    - Helpers/Performance: Introduced collection helpers and an async embedding helper; converted embedding calls in async paths to non-blocking thread offloads; unified collection access across module, including backfill, in [AMS_MRS_v3_Module.py](AMS_MRS_v3_Module.py).
+    - Validation: Added conservative Pydantic bounds for valve fields to prevent invalid configuration values in [AMS_MRS_v3_Module.py](AMS_MRS_v3_Module.py).
+    - Typing/Style: Switched to builtin generics (list/dict/tuple), applied small Ruff-driven cleanups (generator expressions, removed an unused local variable) in [AMS_MRS_v3_Module.py](AMS_MRS_v3_Module.py).
+    - Cleanup: Removed an unused bulleted-list helper and consolidated repeated collection access into helpers in [AMS_MRS_v3_Module.py](AMS_MRS_v3_Module.py).
+    - Notes: Behavior preserved; changes improve readability, safety, responsiveness, and maintainability.
+- v3.10.3 (2025-08-13):
+    - Fix: Deleted-memory citations now display the original memory's importance during update flows by processing DELETE operations before NEW operations in [python._execute_memory_operations()](AMS_MRS_v3_Module.py:974). This prevents the deletion vector lookup from matching a freshly created replacement.
+    - Maintenance: Version/date bump in [AMS_MRS_v3_Module.py](AMS_MRS_v3_Module.py:5).
+    - Example: Memories Processed: 💾 [Preference] Philip enjoys water sports, especially wakeboarding and sailing, and was quite good at kneeboarding, although it isn't popular these days. [importance: 2.00] 🗑️ [Preference] Philip enjoys water sports, especially wakeboarding and sailing, and was quite good at kneeboarding, although it isn't popular these days. [importance: 0.70]
+- v3.10.2 (2025-08-12):
+    - **Logging**: Deduplication log now includes the closest cosine distance (min_dist) from the keeper to other members in a cluster for diagnostics and tuning. Implemented in [Filter._deduplicate_user_memories()](AMS_MRS_v3_Module.py:1502).
+- v3.10.1 (2025-08-12):
+    - **Refactor**: The `_deduplicate_user_memories` function was refactored to use `numpy` for local cosine distance calculation, improving performance and simplifying the code.
+    - **Fix**: Resolved a `ValueError` that occurred during deduplication due to incorrect handling of NumPy array truthiness.
+    - **Fix**: Initialized the `_backfill_checked_users` set in the `__init__` method to prevent a potential `AttributeError`.
+- v3.9.1 (2025-08-12):
+    - **Refactor**: Moved the changelog from the module docstring to `_changelog.md` to stabilize the module header and improve diff-patching reliability.
+    - **Workflow**: Added `_scratchpad.md` and updated the `dev_note` to create a more robust, context-aware development process for AI assistants.
+- v3.9.0 (2025-08-09):
+    - **Feature**: Implemented a robust, two-part emoji delimiter system (`❗️💾...🔚❗️`) for parsing assistant-derived memories. This replaces the fragile line-based parsing with a reliable regex `findall` approach, preventing parsing errors from multi-line or formatted memory content.
+- v3.8.8 (2025-08-09):
+    - **Refactor**: Removed the vestigial, unused `tag` attribute from the `ProcessingMemory` class and all related logic to simplify the architecture and prevent confusion.
+- v3.8.7 (2025-08-08):
+    - **Feature**: Added `vector_db` valve to configure the ChromaDB storage directory.
+- v3.8.6 (2025-08-06):
+    - **Feature**: Added `embedding_model` valve to configure the SentenceTransformer model.
+    - **Fix**: Deferred embedding model loading until after valve configuration is applied to ensure the correct model is used.
+- v3.8.5 (2025-08-05):
+    - **Maintenance**: Pruned the version history changelog to preserve major architectural changes and remove minor diagnostic details for better readability.
+- v3.8.x (2025-08-04/05):
+    - **Architecture**: Unified memory deletion logic with atomic-safe operations
+    - **Vector DB**: Implemented canonical embedding storage for robust deletion
+    - **UI**: Centralized status clearing mechanism
+    - **Diagnostics**: Improved logging for deletion failures
+- v3.7.0 (2025-08-02):
+    - **Logging**: Standardized system with helper methods and removed max_log_lines
+- v3.6.x (2025-08-01):
+    - **Pruning**: Dual-trigger system (session-based deep prune + turn-based safety prune)
+    - **Storage**: Hybrid approach combining fixed limits with percentage-based pruning
+- v3.5.0 (2025-08-01):
+    - **Re-ranking**: Index-based validation replacing content comparison
+    - **Resilience**: Immune to benign LLM content modifications
+- v3.4.0 (2025-07-31):
+    - **Scalability**: Chunked re-ranking for large memory sets
+    - **Valve**: Added rerank_chunk_size control
+- v3.3.x (2025-07-30):
+    - **Search**: Valve-controlled LLM re-ranking with simplified top-k selection
+- v3.2.x (2025-07-25...26):
+    - **Architecture**: Removed Stage 2 processing, clarified inlet/outlet roles
+- v3.1.x (2025-07-23...25):
+    - **Optimization**: Asynchronous storage, improved pruning, unified command parsing
+- v3.0.x (2025-07-21...22):
+    - **Core**: Hybrid search architecture with vector store integrity guarantees
+- v2.x (Legacy):
+    - **Foundation**: Core module architecture and multimodal handling
